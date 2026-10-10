@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "scene": "conference-room",
+  "description": "双固定摄像头对拍会议室",
+  "cameras": [
+    {
+      "id": "cam01",
+      "name": "视角1",
+      "color": "/assets/cam01/color.jpg",
+      "depth": "/assets/cam01/depth.png",
+      "source": {
+        "color": "assets/source/cam01/color.jpg",
+        "depth": "assets/source/cam01/depth.webp"
+      }
+    },
+    {
+      "id": "cam02",
+      "name": "视角2",
+      "color": "/assets/cam02/color.jpg",
+      "depth": "/assets/cam02/depth.png",
+      "source": {
+        "color": "assets/source/cam02/color.jpg",
+        "depth": "assets/source/cam02/depth.webp"
+      }
+    }
+  ],
+  "priors": {
+    "camHeight": 1.8,
+    "baseline": 5.0,
+    "yaw": [0, 180],
+    "pitch": [-6, -6]
+  }
+}

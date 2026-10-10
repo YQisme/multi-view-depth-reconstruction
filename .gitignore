@@ -47,3 +47,9 @@ venv/
 
 # Generated depth previews
 *_depth_preview.png
+
+# Keep source captures; ignore accidental dumps at repo root
+/*.jpg
+/*.webp
+/*.png
+!public/favicon.svg

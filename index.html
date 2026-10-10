@@ -88,13 +88,93 @@
       .hint {
         margin-top: 4px;
       }
+
+      .roam-banner {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 3;
+        padding: 18px 22px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel);
+        backdrop-filter: blur(12px);
+        text-align: center;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.2s ease;
+        max-width: min(420px, calc(100vw - 40px));
+      }
+
+      .roam-banner.visible {
+        opacity: 1;
+        pointer-events: auto;
+        cursor: pointer;
+      }
+
+      .roam-banner h2 {
+        margin: 0 0 8px;
+        font-size: 16px;
+        font-weight: 650;
+      }
+
+      .roam-banner p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.55;
+      }
+
+      .roam-hud {
+        position: absolute;
+        right: 20px;
+        bottom: 18px;
+        z-index: 2;
+        padding: 10px 14px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--panel);
+        backdrop-filter: blur(10px);
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.55;
+        display: none;
+        pointer-events: none;
+      }
+
+      .roam-hud.visible {
+        display: block;
+      }
+
+      .roam-hud kbd {
+        display: inline-block;
+        min-width: 1.4em;
+        padding: 1px 5px;
+        margin: 0 1px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text);
+        font-family: inherit;
+        font-size: 11px;
+        text-align: center;
+      }
     </style>
   </head>
   <body>
     <div id="app">
       <div class="hud">
         <h1>双视角 Depth Anything V2 重建</h1>
-        <p>两台固定摄像头对拍会议室；深度图反投影为彩色网格，可在场景中自由浏览与融合对齐。</p>
+        <p>用相机高度、机间距等物理参数对齐两端对拍重建；支持轨道观察与第一人称漫游。</p>
+      </div>
+      <div class="roam-banner" id="roamBanner" hidden>
+        <h2>点击进入漫游</h2>
+        <p>WASD 移动 · 鼠标环视 · Shift 加速 · E 升高 · Q 降低 · Esc 退出</p>
+      </div>
+      <div class="roam-hud" id="roamHud">
+        <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移动 · <kbd>Shift</kbd> 加速</div>
+        <div>鼠标环视 · <kbd>E</kbd> 升高 · <kbd>Q</kbd> 降低 · <kbd>Esc</kbd> 退出</div>
       </div>
       <div class="status" id="status">正在加载资源…</div>
     </div>
