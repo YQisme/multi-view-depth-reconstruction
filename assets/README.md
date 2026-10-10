@@ -1,35 +1,41 @@
 # 图像资源目录
 
-## 结构
+## 三维坐标约定
+
+清单里的 `pose` 使用用户给定的三维坐标 **(x, y, z)**，单位米：
+
+- **x, y**：水平面位置
+- **z**：高度（当前四机均为 2.5）
+
+映射到 Three.js（Y 轴向上）：
 
 ```
-assets/
-  source/                 # 原始采集（勿直接给前端用）
-    cam01/
-      color.jpg           # RGB 原图
-      depth.webp          # Depth Anything V2 伪彩色深度图
-    cam02/
-      color.jpg
-      depth.webp
-
-public/assets/            # 前端可访问的处理后资源
-  manifest.json           # 统一清单（路径 + 物理先验）
-  cam01/
-    color.jpg
-    depth.png             # 灰度深度
-  cam02/
-    color.jpg
-    depth.png
+three(x, y, z) = user(y, z, x)
 ```
 
-## 新增/更换摄像头画面
+即：用户 X → 场景深度向，用户 Y → 场景水平向，用户 Z → 高度。
 
-1. 把原图和深度图放到 `assets/source/<camId>/`
-2. 在 `public/assets/manifest.json` 的 `cameras` 里登记
-3. 运行：
+当前四机：
 
-```bash
-npm run prepare-assets
+| 相机 | 坐标 (x, y, z) |
+|------|----------------|
+| cam01 | (0, 0, 2.5) |
+| cam02 | (0, 3.8, 2.5) |
+| cam03 | (4.7, 3.8, 2.5) |
+| cam04 | (6.0, 0, 2.5) |
+
+每台相机默认朝向 `lookAt`（桌面中心附近），可用面板里的「整体俯仰微调」调整。
+
+## 目录结构
+
+```
+assets/source/<camId>/color.jpg + depth.webp
+public/assets/manifest.json
+public/assets/<camId>/color.jpg + depth.png
 ```
 
-前端只通过 `src/assets.js` + `manifest.json` 读取资源，不要再写死图片路径。
+## 新增摄像头
+
+1. 放入 `assets/source/<camId>/`
+2. 在 `manifest.json` 登记路径与 `pose: {x,y,z}`
+3. 运行 `npm run prepare-assets`

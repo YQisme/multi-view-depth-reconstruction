@@ -1,70 +1,82 @@
 import * as THREE from 'three';
+import { userToThree } from './assets.js';
 
 /**
- * Place two opposite-facing reconstructions using physical priors.
- * Known camera height + baseline is far more stable than free Sim(3) ICP
- * on relative Depth-Anything maps.
+ * Place N reconstructions from 3D poses (user z-up).
+ * Each camera looks toward lookAt (table / room center).
  */
 export function placeWithPriors({
-  camHeight = 1.8,
-  baseline = 5.0,
-  yaw1 = 0,
-  yaw2 = 180,
-  pitch1 = -6,
-  pitch2 = -6,
-  offsetX1 = 0,
-  offsetX2 = 0,
-  depthScale1 = 1,
-  depthScale2 = 1,
+  poses,
+  lookAt,
+  depthScales = [],
+  defaultPitchDeg = -18,
 } = {}) {
-  const half = baseline * 0.5;
+  if (!poses?.length) throw new Error('placeWithPriors requires poses[]');
 
-  const m1 = composeCameraMatrix({
-    x: offsetX1,
-    y: camHeight,
-    z: half,
-    pitchDeg: pitch1,
-    yawDeg: yaw1,
-    scale: depthScale1,
-  });
+  const target = lookAt?.clone?.() ?? lookAt ?? new THREE.Vector3(0, 1, 0);
+  // Use Camera.lookAt so local -Z faces the target (matches depth unprojection).
+  const tmpCam = new THREE.PerspectiveCamera();
+  const up = new THREE.Vector3(0, 1, 0);
 
-  const m2 = composeCameraMatrix({
-    x: offsetX2,
-    y: camHeight,
-    z: -half,
-    pitchDeg: pitch2,
-    yawDeg: yaw2,
-    scale: depthScale2,
+  const matrices = poses.map((pose, i) => {
+    const eye = userToThree(pose);
+    const scale = depthScales[i] ?? 1;
+    const S = new THREE.Matrix4().makeScale(scale, scale, scale);
+
+    // Prefer explicit yaw/pitch if provided; else lookAt room center.
+    if (pose.yaw != null || pose.pitch != null) {
+      return composeCameraMatrix({
+        x: eye.x,
+        y: eye.y,
+        z: eye.z,
+        pitchDeg: pose.pitch ?? defaultPitchDeg,
+        yawDeg: pose.yaw ?? 0,
+        scale,
+      });
+    }
+
+    tmpCam.position.copy(eye);
+    tmpCam.up.copy(up);
+    tmpCam.lookAt(target);
+    // Extra tilt for ceiling cams (negative = look more downward)
+    if (defaultPitchDeg) {
+      tmpCam.rotateX(THREE.MathUtils.degToRad(defaultPitchDeg - (-12)));
+    }
+    tmpCam.updateMatrixWorld(true);
+    return tmpCam.matrixWorld.clone().multiply(S);
   });
 
   return {
-    m1,
-    m2,
-    scale: depthScale2 / Math.max(1e-6, depthScale1),
+    matrices,
+    m1: matrices[0],
+    m2: matrices[1] ?? matrices[0].clone(),
+    scale: (depthScales[1] ?? 1) / Math.max(1e-6, depthScales[0] ?? 1),
     rmse: NaN,
     inlierRatio: 0,
-    hypothesis: 'physical-prior',
+    hypothesis: 'lookat-3d',
     mode: 'prior',
   };
 }
 
-/**
- * Estimate a metric scale so each view's "far wall" roughly matches baseline.
- * Returns per-view scale factors around 1.0.
- */
-export function estimateDepthScales(mesh1, mesh2, baseline, farDepth) {
-  const target = baseline * 0.92;
-  const d1 = estimateFarDistance(mesh1);
-  const d2 = estimateFarDistance(mesh2);
+export function estimateDepthScalesForViews(meshes, refDistance, farDepth) {
+  const target = Math.max(1.2, refDistance) * 0.75;
   const fallback = farDepth * 0.85;
-  const s1 = clamp(target / Math.max(0.5, d1 || fallback), 0.55, 1.8);
-  const s2 = clamp(target / Math.max(0.5, d2 || fallback), 0.55, 1.8);
-  return { depthScale1: s1, depthScale2: s2, far1: d1, far2: d2 };
+  const scales = [];
+  const fars = [];
+  for (const mesh of meshes) {
+    const d = estimateFarDistance(mesh);
+    fars.push(d);
+    scales.push(clamp(target / Math.max(0.5, d || fallback), 0.45, 2.0));
+  }
+  return { scales, fars };
 }
 
-/**
- * Small rigid refinement of view2 onto view1. Does not free-scale wildly.
- */
+/** @deprecated pair helper kept for compatibility */
+export function estimateDepthScales(mesh1, mesh2, refDistance, farDepth) {
+  const { scales, fars } = estimateDepthScalesForViews([mesh1, mesh2], refDistance, farDepth);
+  return { depthScale1: scales[0], depthScale2: scales[1], far1: fars[0], far2: fars[1] };
+}
+
 export function refineRigid(mesh1, mesh2, m1, m2, {
   iterations = 12,
   maxDist = 0.35,
@@ -106,11 +118,16 @@ export function refineRigid(mesh1, mesh2, m1, m2, {
   return {
     m1: m1.clone(),
     m2: T,
+    matrices: [m1.clone(), T],
     rmse,
     inlierRatio,
     hypothesis: 'prior+rigid-icp',
     mode: 'refine',
   };
+}
+
+export function distanceFromOrigin(pose) {
+  return Math.hypot(pose?.x ?? 0, pose?.y ?? 0);
 }
 
 function composeCameraMatrix({ x, y, z, pitchDeg, yawDeg, scale }) {
@@ -124,7 +141,6 @@ function composeCameraMatrix({ x, y, z, pitchDeg, yawDeg, scale }) {
     ),
   );
   const T = new THREE.Matrix4().makeTranslation(x, y, z);
-  // world = T * R * S * local
   return T.multiply(R).multiply(S);
 }
 
@@ -137,9 +153,8 @@ function estimateFarDistance(mesh) {
   for (let i = 0; i < n; i += step) {
     const u = uv.getX(i);
     const v = uv.getY(i);
-    // central band looking down the room
-    if (u < 0.35 || u > 0.65) continue;
-    if (v < 0.35 || v > 0.75) continue;
+    if (u < 0.3 || u > 0.7) continue;
+    if (v < 0.3 || v > 0.8) continue;
     const z = -pos.getZ(i);
     if (z > 0.8) depths.push(z);
   }

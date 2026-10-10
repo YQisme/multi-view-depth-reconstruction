@@ -2,9 +2,18 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import GUI from 'lil-gui';
 import { createDepthMesh, loadImageData } from './depthMesh.js';
-import { placeWithPriors, estimateDepthScales, refineRigid } from './calibrate.js';
+import { placeWithPriors, estimateDepthScalesForViews } from './calibrate.js';
 import { RoamControls } from './roamControls.js';
-import { loadManifest, loadCameraAssets, applyManifestPriors } from './assets.js';
+import {
+  loadManifest,
+  loadCameraAssets,
+  getLookAtTarget,
+  getCameraPoses,
+  maxPairwiseDistance,
+  userToThree,
+  clearManifestCache,
+} from './assets.js';
+import { createWorldAxes } from './worldAxes.js';
 
 const statusEl = document.getElementById('status');
 const roamBanner = document.getElementById('roamBanner');
@@ -17,51 +26,39 @@ const setStatus = (html) => {
 const params = {
   viewMode: '融合',
   controlMode: '轨道观察',
-  fov: 72,
-  nearDepth: 0.45,
-  farDepth: 6.0,
+  fov: 78,
+  nearDepth: 0.4,
+  farDepth: 8,
   depthGamma: 0.95,
   edgeThreshold: 0.09,
   stride: 3,
   invertDepth: false,
-  // Physical camera priors (meters / degrees)
-  camHeight: 1.8,
-  baseline: 5.0,
-  yaw1: 0,
-  yaw2: 180,
-  pitch1: -6,
-  pitch2: -6,
-  offsetX1: 0,
-  offsetX2: 0,
+  lookTilt: -18,
   autoDepthScale: true,
-  depthScale1: 1,
-  depthScale2: 1,
-  refineIcp: false,
   ghostBlend: true,
-  offsetX: 0,
-  offsetY: 0,
-  offsetZ: 0,
-  extraYaw: 0,
-  extraPitch: 0,
-  extraRoll: 0,
-  showHelpers: false,
+  showWorldAxes: true,
+  showHelpers: true,
   eyeHeight: 1.7,
   walkSpeed: 2.4,
 };
 
 let renderer, scene, camera, controls, roam, gui;
-let mesh1, mesh2, group1, group2, helpers;
-let color1, color2, depth1, depth2;
+let viewRoot;
+let helpers;
+let worldAxes;
+let views = []; // { id, name, color, depth, mesh, group, axes, depthScale }
 let assetManifest = null;
+let poses = [];
+let matrices = [];
 let rebuilding = false;
-let calib = null;
 let sceneBounds = null;
-const fineDummy = new THREE.Object3D();
 const clock = new THREE.Clock();
 const orbitSnapshot = {
   position: new THREE.Vector3(),
   target: new THREE.Vector3(),
 };
+let viewModeController = null;
+let depthScaleFolder = null;
 
 init();
 
@@ -74,15 +71,15 @@ async function init() {
 
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0b0f14);
-  scene.fog = new THREE.Fog(0x0b0f14, 14, 32);
+  scene.fog = new THREE.Fog(0x0b0f14, 16, 36);
 
   camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.05, 80);
-  camera.position.set(5.5, 3.2, 0.8);
+  camera.position.set(8, 5, 6);
 
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
-  controls.target.set(0, 1.2, 0);
-  controls.maxDistance = 24;
+  controls.target.set(2.7, 1.2, 1.9);
+  controls.maxDistance = 30;
   controls.minDistance = 0.25;
 
   roam = new RoamControls(camera, renderer.domElement, {
@@ -105,16 +102,18 @@ async function init() {
   });
 
   scene.add(new THREE.AmbientLight(0xffffff, 1));
-  scene.add(new THREE.GridHelper(18, 36, 0x2a3a4e, 0x1a2433));
+  scene.add(new THREE.GridHelper(20, 40, 0x2a3a4e, 0x1a2433));
 
-  group1 = new THREE.Group();
-  group2 = new THREE.Group();
-  group1.matrixAutoUpdate = false;
-  group2.matrixAutoUpdate = false;
-  scene.add(group1, group2);
+  viewRoot = new THREE.Group();
+  scene.add(viewRoot);
+
+  // User-frame axes at origin (0,0,0): X红 Y绿 Z蓝(高度)
+  worldAxes = createWorldAxes({ size: 2.4, origin: new THREE.Vector3(0, 0, 0) });
+  worldAxes.visible = params.showWorldAxes;
+  scene.add(worldAxes);
 
   helpers = new THREE.Group();
-  helpers.visible = false;
+  helpers.visible = params.showHelpers;
   scene.add(helpers);
 
   setupGui();
@@ -122,14 +121,13 @@ async function init() {
 
   setStatus('正在加载资源清单与图像…');
   try {
+    clearManifestCache();
     assetManifest = await loadManifest();
-    applyManifestPriors(params, assetManifest);
-    const views = await loadCameraAssets(loadImageData, assetManifest);
-    if (views.length < 2) throw new Error('清单中至少需要两个摄像头资源');
-    color1 = views[0].color;
-    depth1 = views[0].depth;
-    color2 = views[1].color;
-    depth2 = views[1].depth;
+    poses = getCameraPoses(assetManifest);
+    views = await loadCameraAssets(loadImageData, assetManifest);
+    if (views.length < 1) throw new Error('清单中至少需要一个摄像头资源');
+    refreshViewModeOptions();
+    refreshDepthScaleControls();
     await rebuildMeshes();
   } catch (err) {
     console.error(err);
@@ -142,8 +140,8 @@ async function init() {
 function setupGui() {
   gui = new GUI({ title: '重建控制' });
 
-  gui
-    .add(params, 'viewMode', ['融合', '视角1', '视角2'])
+  viewModeController = gui
+    .add(params, 'viewMode', ['融合'])
     .name('显示')
     .onChange(applyVisibility);
 
@@ -163,7 +161,7 @@ function setupGui() {
   roamFolder.add({ spawn: () => startRoam(true) }, 'spawn').name('传送到房间中心');
 
   const depthFolder = gui.addFolder('深度映射');
-  depthFolder.add(params, 'fov', 40, 100, 0.5).name('相机 FOV').onFinishChange(rebuildMeshes);
+  depthFolder.add(params, 'fov', 40, 110, 0.5).name('相机 FOV').onFinishChange(rebuildMeshes);
   depthFolder.add(params, 'nearDepth', 0.15, 3, 0.01).name('近平面').onFinishChange(rebuildMeshes);
   depthFolder.add(params, 'farDepth', 3, 18, 0.05).name('远平面').onFinishChange(rebuildMeshes);
   depthFolder.add(params, 'depthGamma', 0.4, 2.2, 0.01).name('深度伽马').onFinishChange(rebuildMeshes);
@@ -171,46 +169,49 @@ function setupGui() {
   depthFolder.add(params, 'stride', 1, 4, 1).name('采样步进').onFinishChange(rebuildMeshes);
   depthFolder.add(params, 'invertDepth').name('反转深度').onFinishChange(rebuildMeshes);
 
-  const priorFolder = gui.addFolder('相机物理参数');
-  priorFolder.add(params, 'camHeight', 0.6, 2.8, 0.01).name('相机高度(m)').onFinishChange(applyPriors);
-  priorFolder.add(params, 'baseline', 2, 14, 0.05).name('机间距(m)').onFinishChange(applyPriors);
-  priorFolder.add(params, 'yaw1', -180, 180, 0.5).name('视角1 偏航').onFinishChange(applyPriors);
-  priorFolder.add(params, 'yaw2', -180, 180, 0.5).name('视角2 偏航').onFinishChange(applyPriors);
-  priorFolder.add(params, 'pitch1', -30, 30, 0.5).name('视角1 俯仰').onFinishChange(applyPriors);
-  priorFolder.add(params, 'pitch2', -30, 30, 0.5).name('视角2 俯仰').onFinishChange(applyPriors);
-  priorFolder.add(params, 'offsetX1', -2, 2, 0.01).name('视角1 X偏移').onFinishChange(applyPriors);
-  priorFolder.add(params, 'offsetX2', -2, 2, 0.01).name('视角2 X偏移').onFinishChange(applyPriors);
-  priorFolder.add(params, 'autoDepthScale').name('按机间距估尺度').onFinishChange(applyPriors);
-  priorFolder.add(params, 'depthScale1', 0.4, 2.2, 0.01).name('视角1 深度尺度').onFinishChange(applyPriors);
-  priorFolder.add(params, 'depthScale2', 0.4, 2.2, 0.01).name('视角2 深度尺度').onFinishChange(applyPriors);
-  priorFolder.add(params, 'refineIcp').name('ICP 小幅精修').onFinishChange(applyPriors);
+  const priorFolder = gui.addFolder('三维位姿');
+  priorFolder.add(params, 'lookTilt', -40, 0, 0.5).name('整体俯仰微调').onFinishChange(applyPriors);
+  priorFolder.add(params, 'autoDepthScale').name('按房间尺度估深度').onFinishChange(applyPriors);
+  depthScaleFolder = priorFolder.addFolder('各视角深度尺度');
   priorFolder.add({ run: () => applyPriors() }, 'run').name('应用位姿');
 
-  const calibFolder = gui.addFolder('融合微调');
-  calibFolder.add(params, 'ghostBlend').name('半透明叠加').onChange(applyOpacity);
-  calibFolder.add(params, 'offsetX', -1.5, 1.5, 0.005).name('视角2 微调X').onChange(applyPoses);
-  calibFolder.add(params, 'offsetY', -1.2, 1.2, 0.005).name('视角2 微调Y').onChange(applyPoses);
-  calibFolder.add(params, 'offsetZ', -2, 2, 0.005).name('视角2 微调Z').onChange(applyPoses);
-  calibFolder.add(params, 'extraYaw', -25, 25, 0.1).name('视角2 微调偏航').onChange(applyPoses);
-  calibFolder.add(params, 'extraPitch', -15, 15, 0.1).name('视角2 微调俯仰').onChange(applyPoses);
-  calibFolder.add(params, 'extraRoll', -15, 15, 0.1).name('视角2 微调滚转').onChange(applyPoses);
-  calibFolder.add({ resetFine }, 'resetFine').name('清零微调');
-
+  gui.add(params, 'ghostBlend').name('半透明叠加').onChange(applyOpacity);
+  gui.add(params, 'showWorldAxes').name('显示 XYZ 轴').onChange((v) => {
+    if (worldAxes) worldAxes.visible = v;
+  });
   gui.add(params, 'showHelpers').name('显示相机坐标').onChange((v) => {
     helpers.visible = v;
   });
-  gui.add({ reset: () => {
-    if (params.controlMode === '轨道观察') controls.reset();
-  } }, 'reset').name('重置视角');
+  gui.add({
+    reset: () => {
+      if (params.controlMode === '轨道观察') controls.reset();
+    },
+  }, 'reset').name('重置视角');
   gui.add({ fit: fitView }, 'fit').name('框住场景');
 }
 
-function resetFine() {
-  params.offsetX = params.offsetY = params.offsetZ = 0;
-  params.extraYaw = params.extraPitch = params.extraRoll = 0;
-  gui.controllers.forEach((c) => c.updateDisplay());
-  gui.folders.forEach((f) => f.controllers.forEach((c) => c.updateDisplay()));
-  applyPoses();
+function refreshViewModeOptions() {
+  const options = ['融合', ...views.map((v) => v.name)];
+  if (!options.includes(params.viewMode)) params.viewMode = '融合';
+  if (viewModeController) {
+    viewModeController.destroy();
+    viewModeController = gui
+      .add(params, 'viewMode', options)
+      .name('显示')
+      .onChange(applyVisibility);
+    // keep near top: lil-gui appends; acceptable
+  }
+}
+
+function refreshDepthScaleControls() {
+  if (!depthScaleFolder) return;
+  // Clear previous controllers
+  [...depthScaleFolder.controllers].forEach((c) => c.destroy());
+  views.forEach((v, i) => {
+    const key = `scale_${v.id}`;
+    params[key] = v.depthScale ?? 1;
+    depthScaleFolder.add(params, key, 0.4, 2.2, 0.01).name(v.name).onFinishChange(applyPriors);
+  });
 }
 
 function updateRoamUi(locked = roam?.isLocked) {
@@ -253,70 +254,64 @@ function startRoam(toCenter = false) {
   updateSceneBounds();
   roam.setBounds(sceneBounds);
 
-  const spawn = toCenter || !Number.isFinite(camera.position.x)
+  const spawn = toCenter || camera.position.distanceTo(controls.target) > 4
     ? getRoamSpawn()
     : {
         position: new THREE.Vector3(camera.position.x, params.eyeHeight, camera.position.z),
         lookAt: controls.target.clone().setY(params.eyeHeight),
       };
 
-  // Prefer a room-center spawn when first entering from orbit far away.
-  if (!toCenter && camera.position.distanceTo(controls.target) > 4) {
-    Object.assign(spawn, getRoamSpawn());
-  }
-
   roam.enter(spawn);
-  setStatus('<strong>漫游中</strong><div class="hint">WASD 移动 · 鼠标环视 · Esc 退出指针锁定</div>');
+  setStatus('<strong>漫游中</strong><div class="hint">WASD 移动 · Q/E 升降 · 鼠标环视 · Esc 退出</div>');
 }
 
 function getRoamSpawn() {
   updateSceneBounds();
   const center = sceneBounds
     ? sceneBounds.getCenter(new THREE.Vector3())
-    : new THREE.Vector3(0, 0, 0);
-  const position = new THREE.Vector3(center.x, params.eyeHeight, center.z + 1.6);
-  const lookAt = new THREE.Vector3(center.x, params.eyeHeight, center.z - 2.5);
-  return { position, lookAt };
+    : getLookAtTarget(assetManifest);
+  return {
+    position: new THREE.Vector3(center.x, params.eyeHeight, center.z + 1.2),
+    lookAt: new THREE.Vector3(center.x, params.eyeHeight, center.z - 1.5),
+  };
 }
 
 function updateSceneBounds() {
-  group1.updateWorldMatrix(true, true);
-  group2.updateWorldMatrix(true, true);
   const box = new THREE.Box3();
-  if (group1.visible) box.expandByObject(group1);
-  if (group2.visible) box.expandByObject(group2);
+  for (const v of views) {
+    if (!v.group?.visible) continue;
+    v.group.updateWorldMatrix(true, true);
+    box.expandByObject(v.group);
+  }
   if (box.isEmpty()) {
     sceneBounds = new THREE.Box3(
-      new THREE.Vector3(-4, 0.3, -6),
-      new THREE.Vector3(4, 3.2, 6),
+      new THREE.Vector3(-1, 0.3, -1),
+      new THREE.Vector3(7, 3.5, 5),
     );
     return;
   }
-  // Slightly shrink so the camera stays inside the reconstructed volume.
-  const pad = 0.35;
+  const pad = 0.3;
   sceneBounds = box.clone();
   sceneBounds.min.addScalar(pad);
   sceneBounds.max.subScalar(pad);
-  sceneBounds.min.y = Math.min(sceneBounds.min.y, 0.4);
+  sceneBounds.min.y = Math.min(sceneBounds.min.y, 0.35);
   sceneBounds.max.y = Math.max(sceneBounds.max.y, params.eyeHeight + 1.2);
-  if (sceneBounds.min.x > sceneBounds.max.x) {
-    const c = box.getCenter(new THREE.Vector3());
-    sceneBounds.min.set(c.x - 2, 0.4, c.z - 3);
-    sceneBounds.max.set(c.x + 2, 3, c.z + 3);
-  }
 }
 
 async function rebuildMeshes() {
-  if (rebuilding || !color1) return;
+  if (rebuilding || !views.length) return;
   rebuilding = true;
-  setStatus('正在重建网格…');
+  setStatus(`正在重建 ${views.length} 路网格…`);
 
-  disposeMesh(mesh1);
-  disposeMesh(mesh2);
-  group1.clear();
-  group2.clear();
+  for (const v of views) {
+    disposeMesh(v.mesh);
+    v.mesh = null;
+    if (v.group) {
+      viewRoot.remove(v.group);
+      v.group = null;
+    }
+  }
   helpers.clear();
-  calib = null;
 
   const common = {
     stride: params.stride,
@@ -330,94 +325,83 @@ async function rebuildMeshes() {
 
   await new Promise((r) => setTimeout(r, 16));
 
-  mesh1 = createDepthMesh({
-    ...common,
-    colorImage: color1.image,
-    depthData: depth1.data,
-    colorWidth: color1.width,
-    colorHeight: color1.height,
-    depthWidth: depth1.width,
-    depthHeight: depth1.height,
-  });
-  mesh2 = createDepthMesh({
-    ...common,
-    colorImage: color2.image,
-    depthData: depth2.data,
-    colorWidth: color2.width,
-    colorHeight: color2.height,
-    depthWidth: depth2.width,
-    depthHeight: depth2.height,
-  });
+  for (const v of views) {
+    const mesh = createDepthMesh({
+      ...common,
+      colorImage: v.color.image,
+      depthData: v.depth.data,
+      colorWidth: v.color.width,
+      colorHeight: v.color.height,
+      depthWidth: v.depth.width,
+      depthHeight: v.depth.height,
+    });
+    mesh.name = v.id;
+    const group = new THREE.Group();
+    group.name = v.id;
+    group.matrixAutoUpdate = false;
+    group.add(mesh);
+    viewRoot.add(group);
 
-  group1.add(mesh1);
-  group2.add(mesh2);
+    const axes = new THREE.AxesHelper(0.4);
+    axes.matrixAutoUpdate = false;
+    helpers.add(axes);
 
-  const axes1 = new THREE.AxesHelper(0.45);
-  const axes2 = new THREE.AxesHelper(0.45);
-  axes1.matrixAutoUpdate = false;
-  axes2.matrixAutoUpdate = false;
-  helpers.add(axes1, axes2);
-  helpers.userData.axes1 = axes1;
-  helpers.userData.axes2 = axes2;
+    v.mesh = mesh;
+    v.group = group;
+    v.axes = axes;
+    v.depthScale = params[`scale_${v.id}`] ?? v.depthScale ?? 1;
+  }
 
   applyOpacity();
   applyVisibility();
-
   await applyPriors(true);
   rebuilding = false;
 }
 
 async function applyPriors(fit = false) {
-  if (!mesh1 || !mesh2) return;
-  setStatus('正在按物理参数放置双机…');
+  if (!views.length || views.some((v) => !v.mesh)) return;
+  setStatus('正在按三维坐标放置相机…');
   await new Promise((r) => setTimeout(r, 20));
 
   try {
-    let depthScale1 = params.depthScale1;
-    let depthScale2 = params.depthScale2;
+    poses = getCameraPoses(assetManifest);
+    const lookAt = getLookAtTarget(assetManifest);
+    const roomSpan = maxPairwiseDistance(poses) || 6;
+
+    let scales = views.map((v) => params[`scale_${v.id}`] ?? v.depthScale ?? 1);
     let scaleNote = '';
 
     if (params.autoDepthScale) {
-      const est = estimateDepthScales(mesh1, mesh2, params.baseline, params.farDepth);
-      depthScale1 = est.depthScale1;
-      depthScale2 = est.depthScale2;
-      params.depthScale1 = depthScale1;
-      params.depthScale2 = depthScale2;
-      gui.folders.forEach((f) => f.controllers.forEach((c) => c.updateDisplay()));
-      scaleNote = ` · 远距≈${est.far1.toFixed(1)}/${est.far2.toFixed(1)}m`;
-    }
-
-    calib = placeWithPriors({
-      camHeight: params.camHeight,
-      baseline: params.baseline,
-      yaw1: params.yaw1,
-      yaw2: params.yaw2,
-      pitch1: params.pitch1,
-      pitch2: params.pitch2,
-      offsetX1: params.offsetX1,
-      offsetX2: params.offsetX2,
-      depthScale1,
-      depthScale2,
-    });
-
-    if (params.refineIcp) {
-      setStatus('正在 ICP 小幅精修…');
-      await new Promise((r) => setTimeout(r, 20));
-      const refined = refineRigid(mesh1, mesh2, calib.m1, calib.m2, {
-        iterations: 12,
-        maxDist: 0.4,
+      const est = estimateDepthScalesForViews(
+        views.map((v) => v.mesh),
+        roomSpan,
+        params.farDepth,
+      );
+      scales = est.scales;
+      views.forEach((v, i) => {
+        v.depthScale = scales[i];
+        params[`scale_${v.id}`] = scales[i];
       });
-      calib = { ...calib, ...refined, scale: depthScale2 / depthScale1 };
+      depthScaleFolder?.controllers.forEach((c) => c.updateDisplay());
+      scaleNote = ` · 远距[${est.fars.map((d) => d.toFixed(1)).join(',')}]`;
     }
+
+    const calib = placeWithPriors({
+      poses,
+      lookAt,
+      depthScales: scales,
+      defaultPitchDeg: params.lookTilt,
+    });
+    matrices = calib.matrices;
 
     applyPoses();
     if (fit && params.controlMode === '轨道观察') fitView();
     else updateSceneBounds();
 
-    const rmseTxt = Number.isFinite(calib.rmse) ? ` · RMSE ${calib.rmse.toFixed(3)}` : '';
-    reportReady(
-      `物理先验对齐 · 高度 ${params.camHeight.toFixed(2)}m · 间距 ${params.baseline.toFixed(2)}m · 尺度 ${depthScale1.toFixed(2)}/${depthScale2.toFixed(2)}${scaleNote}${rmseTxt}`,
-    );
+    const poseTxt = poses
+      .map((p) => `${p.id}(${p.x},${p.y},${p.z})`)
+      .join(' · ');
+    reportReady(`四机三维位姿 · ${poseTxt}${scaleNote}`);
   } catch (err) {
     console.error(err);
     setStatus(`对齐失败：${err.message}`);
@@ -425,44 +409,40 @@ async function applyPriors(fit = false) {
 }
 
 function reportReady(extra) {
-  const faces1 = mesh1.geometry.index ? mesh1.geometry.index.count / 3 : 0;
-  const faces2 = mesh2.geometry.index ? mesh2.geometry.index.count / 3 : 0;
+  const faceTxt = views
+    .map((v) => {
+      const n = v.mesh?.geometry?.index ? v.mesh.geometry.index.count / 3 : 0;
+      return `${v.name} ${Math.round(n)}`;
+    })
+    .join(' · ');
   setStatus(
-    `<strong>${extra}</strong><div class="hint">视角1 ${Math.round(faces1)} 面 · 视角2 ${Math.round(faces2)} 面 · 可切换「漫游视角」走进场景</div>`,
+    `<strong>${extra}</strong><div class="hint">${faceTxt} 三角面 · 可切换单视角或漫游</div>`,
   );
 }
 
 function applyPoses() {
-  if (!calib) return;
-
-  group1.matrix.copy(calib.m1);
-
-  fineDummy.position.set(params.offsetX, params.offsetY, params.offsetZ);
-  fineDummy.rotation.set(
-    THREE.MathUtils.degToRad(params.extraPitch),
-    THREE.MathUtils.degToRad(params.extraYaw),
-    THREE.MathUtils.degToRad(params.extraRoll),
-    'YXZ',
-  );
-  fineDummy.updateMatrix();
-  group2.matrix.copy(fineDummy.matrix).multiply(calib.m2);
-  group1.matrixWorldNeedsUpdate = true;
-  group2.matrixWorldNeedsUpdate = true;
-
-  if (helpers.userData.axes1) {
-    helpers.userData.axes1.matrix.copy(group1.matrix);
-    helpers.userData.axes2.matrix.copy(group2.matrix);
-    helpers.userData.axes1.matrixWorldNeedsUpdate = true;
-    helpers.userData.axes2.matrixWorldNeedsUpdate = true;
-  }
+  if (!matrices.length) return;
+  views.forEach((v, i) => {
+    const m = matrices[i];
+    if (!m || !v.group) return;
+    v.group.matrix.copy(m);
+    v.group.matrixWorldNeedsUpdate = true;
+    if (v.axes) {
+      v.axes.matrix.copy(m);
+      v.axes.matrixWorldNeedsUpdate = true;
+    }
+  });
   updateSceneBounds();
   roam?.setBounds(sceneBounds);
 }
 
 function applyOpacity() {
   const ghost = params.ghostBlend && params.viewMode === '融合';
-  setMeshOpacity(mesh1, ghost ? 0.78 : 1);
-  setMeshOpacity(mesh2, ghost ? 0.62 : 1);
+  const n = Math.max(1, views.length);
+  views.forEach((v, i) => {
+    const opacity = ghost ? Math.max(0.45, 0.9 - i * (0.35 / n)) : 1;
+    setMeshOpacity(v.mesh, opacity);
+  });
 }
 
 function setMeshOpacity(mesh, opacity) {
@@ -475,8 +455,9 @@ function setMeshOpacity(mesh, opacity) {
 
 function applyVisibility() {
   const mode = params.viewMode;
-  group1.visible = mode === '融合' || mode === '视角1';
-  group2.visible = mode === '融合' || mode === '视角2';
+  views.forEach((v) => {
+    if (v.group) v.group.visible = mode === '融合' || mode === v.name;
+  });
   applyOpacity();
   updateSceneBounds();
   roam?.setBounds(sceneBounds);
@@ -488,20 +469,26 @@ function fitView() {
     return;
   }
 
-  group1.updateWorldMatrix(true, true);
-  group2.updateWorldMatrix(true, true);
-  const box = new THREE.Box3();
-  if (group1.visible) box.expandByObject(group1);
-  if (group2.visible) box.expandByObject(group2);
-  if (box.isEmpty()) return;
+  updateSceneBounds();
+  const box = sceneBounds?.clone();
+  if (!box || box.isEmpty()) {
+    const t = getLookAtTarget(assetManifest);
+    controls.target.copy(t);
+    camera.position.set(t.x + 5, t.y + 3, t.z + 5);
+    controls.update();
+    return;
+  }
+
+  // Also include camera rig positions so empty depth doesn't collapse view
+  for (const p of poses) box.expandByPoint(userToThree(p));
 
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
   const maxDim = Math.max(size.x, size.y, size.z, 1);
-  const dist = maxDim * 0.95;
+  const dist = maxDim * 1.1;
 
   controls.target.copy(center);
-  camera.position.set(center.x + dist * 0.85, center.y + dist * 0.45, center.z + dist * 0.15);
+  camera.position.set(center.x + dist * 0.7, center.y + dist * 0.55, center.z + dist * 0.7);
   camera.near = Math.max(0.05, dist / 120);
   camera.far = dist * 25;
   camera.updateProjectionMatrix();
@@ -528,10 +515,7 @@ function onResize() {
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(0.05, clock.getDelta());
-  if (params.controlMode === '漫游视角') {
-    roam.update(dt);
-  } else {
-    controls.update();
-  }
+  if (params.controlMode === '漫游视角') roam.update(dt);
+  else controls.update();
   renderer.render(scene, camera);
 }

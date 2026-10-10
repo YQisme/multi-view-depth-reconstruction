@@ -1,7 +1,17 @@
 {
-  "version": 1,
+  "version": 3,
   "scene": "conference-room",
-  "description": "双固定摄像头对拍会议室",
+  "description": "四摄像头会议室；pose 为三维坐标 (x,y,z)，单位米，z 为高度",
+  "coordinateSystem": {
+    "up": "z",
+    "unit": "m",
+    "threeMapping": "three(x,y,z) = user(y, z, x)"
+  },
+  "lookAt": {
+    "x": 2.7,
+    "y": 1.9,
+    "z": 1.0
+  },
   "cameras": [
     {
       "id": "cam01",
@@ -11,6 +21,11 @@
       "source": {
         "color": "assets/source/cam01/color.jpg",
         "depth": "assets/source/cam01/depth.webp"
+      },
+      "pose": {
+        "x": 0,
+        "y": 0,
+        "z": 2.5
       }
     },
     {
@@ -21,13 +36,42 @@
       "source": {
         "color": "assets/source/cam02/color.jpg",
         "depth": "assets/source/cam02/depth.webp"
+      },
+      "pose": {
+        "x": 0,
+        "y": 3.8,
+        "z": 2.5
+      }
+    },
+    {
+      "id": "cam03",
+      "name": "视角3",
+      "color": "/assets/cam03/color.jpg",
+      "depth": "/assets/cam03/depth.png",
+      "source": {
+        "color": "assets/source/cam03/color.jpg",
+        "depth": "assets/source/cam03/depth.webp"
+      },
+      "pose": {
+        "x": 4.7,
+        "y": 3.8,
+        "z": 2.5
+      }
+    },
+    {
+      "id": "cam04",
+      "name": "视角4",
+      "color": "/assets/cam04/color.jpg",
+      "depth": "/assets/cam04/depth.png",
+      "source": {
+        "color": "assets/source/cam04/color.jpg",
+        "depth": "assets/source/cam04/depth.webp"
+      },
+      "pose": {
+        "x": 6.0,
+        "y": 0,
+        "z": 2.5
       }
     }
-  ],
-  "priors": {
-    "camHeight": 1.8,
-    "baseline": 5.0,
-    "yaw": [0, 180],
-    "pitch": [-6, -6]
-  }
+  ]
 }
