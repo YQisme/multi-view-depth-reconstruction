@@ -35,11 +35,11 @@ const params = {
   invertDepth: false,
   lookTilt: -18,
   autoDepthScale: true,
-  blendMode: '半透明', // 不透明 | 半透明 | 视角跟随
-  showGrid: true,
-  showWorldAxes: true,
-  showHelpers: true,
-  eyeHeight: 1.7,
+  blendMode: '视角跟随', // 不透明 | 半透明 | 视角跟随
+  showGrid: false,
+  showWorldAxes: false,
+  showHelpers: false,
+  eyeHeight: 1.35,
   walkSpeed: 2.4,
 };
 
@@ -64,6 +64,8 @@ let depthScaleFolder = null;
 const _viewDir = new THREE.Vector3();
 const _camFwd = new THREE.Vector3();
 let lastFollowId = null;
+let lastFollowScore = -Infinity;
+let lastFollowSwitchAt = 0;
 
 init();
 
@@ -270,35 +272,38 @@ function startRoam(toCenter = false) {
   updateSceneBounds();
   roam.setBounds(sceneBounds);
 
-  const spawn = toCenter || camera.position.distanceTo(controls.target) > 4
-    ? getRoamSpawn()
-    : {
-        position: new THREE.Vector3(camera.position.x, params.eyeHeight, camera.position.z),
-        lookAt: controls.target.clone().setY(params.eyeHeight),
-      };
-
+  // Always spawn at walking height near room center for predictable start
+  const spawn = getRoamSpawn();
   roam.enter(spawn);
-  setStatus('<strong>漫游中</strong><div class="hint">WASD 移动 · Q/E 升降 · 鼠标环视 · Esc 退出</div>');
+  lastFollowId = null;
+  lastFollowSwitchAt = 0;
+  updateViewFollow(true);
+  setStatus('<strong>漫游中</strong><div class="hint">WASD 移动 · Q/E 升降 · 鼠标环视 · Esc 退出 · 视角跟随自动切换</div>');
 }
 
 function getRoamSpawn() {
   updateSceneBounds();
-  const center = sceneBounds
-    ? sceneBounds.getCenter(new THREE.Vector3())
-    : getLookAtTarget(assetManifest);
-  return {
-    position: new THREE.Vector3(center.x, params.eyeHeight, center.z + 1.2),
-    lookAt: new THREE.Vector3(center.x, params.eyeHeight, center.z - 1.5),
-  };
+  const target = assetManifest
+    ? getLookAtTarget(assetManifest)
+    : sceneBounds.getCenter(new THREE.Vector3());
+  // Stand near table center at eye height, look along +X (user) / scene depth
+  const eyeY = params.eyeHeight;
+  const position = new THREE.Vector3(target.x, eyeY, target.z);
+  const lookAt = new THREE.Vector3(target.x + 1.2, eyeY, target.z + 0.4);
+  return { position, lookAt };
 }
 
 function updateSceneBounds() {
+  // Always include all views + camera poses so roam bounds don't collapse
+  // when "视角跟随" hides other meshes.
   const box = new THREE.Box3();
   for (const v of views) {
-    if (!v.group?.visible) continue;
+    if (!v.group) continue;
     v.group.updateWorldMatrix(true, true);
     box.expandByObject(v.group);
   }
+  for (const p of poses) box.expandByPoint(userToThree(p));
+
   if (box.isEmpty()) {
     sceneBounds = new THREE.Box3(
       new THREE.Vector3(-1, 0.3, -1),
@@ -306,12 +311,14 @@ function updateSceneBounds() {
     );
     return;
   }
-  const pad = 0.3;
+  const pad = 0.25;
   sceneBounds = box.clone();
-  sceneBounds.min.addScalar(pad);
-  sceneBounds.max.subScalar(pad);
-  sceneBounds.min.y = Math.min(sceneBounds.min.y, 0.35);
-  sceneBounds.max.y = Math.max(sceneBounds.max.y, params.eyeHeight + 1.2);
+  sceneBounds.min.x += pad;
+  sceneBounds.min.z += pad;
+  sceneBounds.max.x -= pad;
+  sceneBounds.max.z -= pad;
+  sceneBounds.min.y = 0.35;
+  sceneBounds.max.y = Math.max(box.max.y, params.eyeHeight + 1.4);
 }
 
 async function rebuildMeshes() {
@@ -490,8 +497,8 @@ function applyVisibility() {
 }
 
 /**
- * Show only the reconstruction whose capture direction best matches
- * the current orbit/roam camera looking direction.
+ * Show only one reconstruction: match mouse look direction to capture cameras.
+ * Walking alone does not switch; rotating the view does.
  */
 function updateViewFollow(force = false) {
   if (!views.length || params.viewMode !== '融合' || params.blendMode !== '视角跟随') {
@@ -499,23 +506,51 @@ function updateViewFollow(force = false) {
   }
 
   camera.getWorldDirection(_viewDir);
+  // Only use horizontal facing so pitch (look up/down) doesn't flip views
+  _viewDir.y = 0;
+  if (_viewDir.lengthSq() < 1e-6) return;
+  _viewDir.normalize();
+
+  const roaming = params.controlMode === '漫游视角';
   let best = null;
-  let bestDot = -Infinity;
+  let bestScore = -Infinity;
+  let currentScore = -Infinity;
 
   for (const v of views) {
     if (!v.group) continue;
-    // Depth mesh looks along local -Z
+    v.group.updateWorldMatrix(true, false);
     _camFwd.set(0, 0, -1).transformDirection(v.group.matrixWorld);
-    const dot = _camFwd.dot(_viewDir);
-    if (dot > bestDot) {
-      bestDot = dot;
+    _camFwd.y = 0;
+    if (_camFwd.lengthSq() < 1e-6) continue;
+    _camFwd.normalize();
+
+    const score = _camFwd.dot(_viewDir);
+    if (v.id === lastFollowId) currentScore = score;
+    if (score > bestScore) {
+      bestScore = score;
       best = v;
     }
   }
 
   if (!best) return;
-  if (!force && best.id === lastFollowId) return;
+  if (!force && best.id === lastFollowId) {
+    lastFollowScore = bestScore;
+    return;
+  }
+
+  // Need a clearly better facing match; ignore tiny mouse jitter
+  const margin = roaming ? 0.22 : 0.12;
+  const cooldown = roaming ? 280 : 160;
+  if (!force && lastFollowId) {
+    if (performance.now() - lastFollowSwitchAt < cooldown) return;
+    if (bestScore < currentScore + margin) return;
+    // Require looking mostly along that camera (avoid weak matches)
+    if (bestScore < 0.35) return;
+  }
+
   lastFollowId = best.id;
+  lastFollowScore = bestScore;
+  lastFollowSwitchAt = performance.now();
 
   views.forEach((v) => {
     if (v.group) v.group.visible = v.id === best.id;

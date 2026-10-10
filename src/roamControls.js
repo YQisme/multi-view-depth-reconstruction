@@ -53,13 +53,14 @@ export class RoamControls {
   }
 
   enter(spawn) {
-    if (spawn) {
+    if (spawn?.position) {
       this.camera.position.copy(spawn.position);
-      if (spawn.lookAt) {
-        this.camera.lookAt(spawn.lookAt);
-      }
+      // Keep explicit spawn height (do not raise to ceiling-ish values)
+      this.camera.position.y = spawn.position.y ?? this.eyeHeight;
+      if (spawn.lookAt) this.camera.lookAt(spawn.lookAt);
+    } else {
+      this.camera.position.y = this.eyeHeight;
     }
-    this.camera.position.y = Math.max(this.camera.position.y, this.eyeHeight);
     this.controls.lock();
   }
 
