@@ -35,7 +35,8 @@ const params = {
   invertDepth: false,
   lookTilt: -18,
   autoDepthScale: true,
-  ghostBlend: true,
+  blendMode: '半透明', // 不透明 | 半透明 | 视角跟随
+  showGrid: true,
   showWorldAxes: true,
   showHelpers: true,
   eyeHeight: 1.7,
@@ -46,6 +47,7 @@ let renderer, scene, camera, controls, roam, gui;
 let viewRoot;
 let helpers;
 let worldAxes;
+let gridHelper;
 let views = []; // { id, name, color, depth, mesh, group, axes, depthScale }
 let assetManifest = null;
 let poses = [];
@@ -59,6 +61,9 @@ const orbitSnapshot = {
 };
 let viewModeController = null;
 let depthScaleFolder = null;
+const _viewDir = new THREE.Vector3();
+const _camFwd = new THREE.Vector3();
+let lastFollowId = null;
 
 init();
 
@@ -102,7 +107,9 @@ async function init() {
   });
 
   scene.add(new THREE.AmbientLight(0xffffff, 1));
-  scene.add(new THREE.GridHelper(20, 40, 0x2a3a4e, 0x1a2433));
+  gridHelper = new THREE.GridHelper(20, 40, 0x2a3a4e, 0x1a2433);
+  gridHelper.visible = params.showGrid;
+  scene.add(gridHelper);
 
   viewRoot = new THREE.Group();
   scene.add(viewRoot);
@@ -175,7 +182,16 @@ function setupGui() {
   depthScaleFolder = priorFolder.addFolder('各视角深度尺度');
   priorFolder.add({ run: () => applyPriors() }, 'run').name('应用位姿');
 
-  gui.add(params, 'ghostBlend').name('半透明叠加').onChange(applyOpacity);
+  gui
+    .add(params, 'blendMode', ['不透明', '半透明', '视角跟随'])
+    .name('叠加方式')
+    .onChange(() => {
+      lastFollowId = null;
+      applyVisibility();
+    });
+  gui.add(params, 'showGrid').name('显示网格').onChange((v) => {
+    if (gridHelper) gridHelper.visible = v;
+  });
   gui.add(params, 'showWorldAxes').name('显示 XYZ 轴').onChange((v) => {
     if (worldAxes) worldAxes.visible = v;
   });
@@ -437,23 +453,33 @@ function applyPoses() {
 }
 
 function applyOpacity() {
-  const ghost = params.ghostBlend && params.viewMode === '融合';
+  const fuse = params.viewMode === '融合';
   const n = Math.max(1, views.length);
   views.forEach((v, i) => {
-    const opacity = ghost ? Math.max(0.45, 0.9 - i * (0.35 / n)) : 1;
+    let opacity = 1;
+    if (fuse && params.blendMode === '半透明') {
+      opacity = Math.max(0.48, 0.88 - i * (0.32 / n));
+    }
     setMeshOpacity(v.mesh, opacity);
   });
 }
 
 function setMeshOpacity(mesh, opacity) {
   if (!mesh) return;
-  mesh.material.transparent = opacity < 0.999;
+  const transparent = opacity < 0.999;
+  mesh.material.transparent = transparent;
   mesh.material.opacity = opacity;
-  mesh.material.depthWrite = opacity > 0.9;
+  mesh.material.depthWrite = opacity > 0.85;
+  mesh.material.depthTest = true;
   mesh.material.needsUpdate = true;
 }
 
 function applyVisibility() {
+  if (params.viewMode === '融合' && params.blendMode === '视角跟随') {
+    updateViewFollow(true);
+    return;
+  }
+
   const mode = params.viewMode;
   views.forEach((v) => {
     if (v.group) v.group.visible = mode === '融合' || mode === v.name;
@@ -461,6 +487,40 @@ function applyVisibility() {
   applyOpacity();
   updateSceneBounds();
   roam?.setBounds(sceneBounds);
+}
+
+/**
+ * Show only the reconstruction whose capture direction best matches
+ * the current orbit/roam camera looking direction.
+ */
+function updateViewFollow(force = false) {
+  if (!views.length || params.viewMode !== '融合' || params.blendMode !== '视角跟随') {
+    return;
+  }
+
+  camera.getWorldDirection(_viewDir);
+  let best = null;
+  let bestDot = -Infinity;
+
+  for (const v of views) {
+    if (!v.group) continue;
+    // Depth mesh looks along local -Z
+    _camFwd.set(0, 0, -1).transformDirection(v.group.matrixWorld);
+    const dot = _camFwd.dot(_viewDir);
+    if (dot > bestDot) {
+      bestDot = dot;
+      best = v;
+    }
+  }
+
+  if (!best) return;
+  if (!force && best.id === lastFollowId) return;
+  lastFollowId = best.id;
+
+  views.forEach((v) => {
+    if (v.group) v.group.visible = v.id === best.id;
+    setMeshOpacity(v.mesh, 1);
+  });
 }
 
 function fitView() {
@@ -517,5 +577,6 @@ function animate() {
   const dt = Math.min(0.05, clock.getDelta());
   if (params.controlMode === '漫游视角') roam.update(dt);
   else controls.update();
+  updateViewFollow();
   renderer.render(scene, camera);
 }
