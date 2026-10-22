@@ -36,6 +36,7 @@ public/assets/<camId>/color.jpg + depth.png
 
 ## 新增摄像头
 
-1. 放入 `assets/source/<camId>/`
-2. 在 `manifest.json` 登记路径与 `pose: {x,y,z}`
-3. 运行 `npm run prepare-assets`
+1. 用 Depth Anything V2 在线 Demo 获取 **Spectral_r 伪彩**深度图（步骤见根目录 [README.md](../README.md#获取深度图depth-anything-v2-在线-demo)）
+2. 放入 `assets/source/<camId>/`（`color.jpg` + `depth.webp`）
+3. 在 `manifest.json` 登记路径与 `pose: {x,y,z}`
+4. 运行 `npm run prepare-assets`
