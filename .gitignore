@@ -52,4 +52,5 @@ venv/
 /*.jpg
 /*.webp
 /*.png
+!/image-*.png
 !public/favicon.svg
